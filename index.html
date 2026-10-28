@@ -183,6 +183,17 @@ a{color:var(--blue-ink)}
 @keyframes toastIn{from{opacity:0;transform:translate(-50%,16px)}}
 .toast button{color:#8CB8FF;font-weight:700;white-space:nowrap}
 /* 목표 탭 */
+.steps{display:flex;flex-direction:column}
+.stp{width:100%;text-align:left;display:flex;align-items:flex-start;gap:12px;padding:10px 0;border-top:1px solid var(--line);font-size:15px;line-height:1.5}
+.stp:first-child{border-top:0}
+.stp .check{width:22px;height:22px;flex:0 0 22px;margin-top:1px}
+.stp .check svg{width:14px;height:14px}
+.stp.on .check{background:var(--blue);border-color:var(--blue);color:#fff}
+.stp.on .check svg{stroke-dashoffset:0}
+.stp.on span:last-child{color:var(--faint);text-decoration:line-through}
+.addrow{display:flex;gap:8px}.addrow .field{flex:1;height:48px}.addrow .btn{flex:0 0 72px;min-height:48px}
+.reqbox{background:var(--blue-weak);color:var(--blue-ink);border-radius:14px;padding:12px 14px;font-size:14px;line-height:1.55}
+.next{font-size:13px;color:var(--blue-ink);font-weight:600}
 .prog{height:10px;border-radius:5px;background:var(--grey-weak);overflow:hidden;position:relative}
 .prog i{display:block;height:100%;width:0;background:var(--blue);border-radius:5px;transition:width .9s var(--ease)}
 .prog.thin{height:6px} .prog.done i{background:var(--green-strong)}
@@ -292,9 +303,25 @@ select.field{appearance:none}
   // ---------- 구글 연결 ----------
   const SCOPES = "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/calendar.events";
   let tokenClient=null, token=null, tokenExp=0, pending=null;
-  const clientId = () => { try{ return localStorage.getItem("studio-client-id")||""; }catch(e){ return ""; } };
+  const clientId = () => { try{ return localStorage.getItem("studio-client-id")||(proxy()?"proxy":""); }catch(e){ return ""; } };
+  // 중계(구글 Apps Script, 내 계정으로 실행)를 쓰면 로그인 없이 바로 연결됨. 연결 링크로 한 번 저장
+  function proxy(){ try{ const v=JSON.parse(localStorage.getItem("studio-proxy")||"null"); return v&&v.u&&v.k?v:null; }catch(e){ return null; } }
+  (function(){
+    const m=location.hash.match(/connect=([A-Za-z0-9_\-]+)/); if(!m) return;
+    try{ const j=JSON.parse(decodeURIComponent(escape(atob(m[1].replace(/-/g,"+").replace(/_/g,"/"))))); if(/^https:\/\/script\.google\.com\/macros\/s\//.test(j.u)&&j.k){ localStorage.setItem("studio-proxy",JSON.stringify({u:j.u,k:j.k})); window.__connected=true; } }catch(e){}
+    history.replaceState(null,"",location.pathname+"#home");
+  })();
+  async function viaProxy(url, opts){
+    const p=proxy(); const o=opts||{};
+    const r=await fetch(p.u,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({key:p.k,url,method:o.method||"GET",body:o.body==null?null:o.body})});
+    if(!r.ok) throw {code:r.status, message:"중계 연결 오류"};
+    const j=await r.json();
+    if(j.status===403 && /bad key/.test(j.body||"")) throw {code:"key"};
+    const st=j.status||500; return new Response([101,204,205,304].includes(st)||j.body==null?null:j.body,{status:st===101?200:st});
+  }
   function errText(e, server){
     const c = e && e.code;
+    if(c==="key") return {t:"연결 코드가 맞지 않아요", d:"맥에서 받은 연결 링크를 휴대폰에서 다시 열어 주세요."};
     if(c==="auth") return {t:"구글 로그인이 필요해요", d:"아래 '구글 계정 연결'을 눌러 주세요."};
     if(c===401) return {t:"구글 로그인이 만료됐어요", d:"아래 '구글 계정 연결'을 다시 눌러 주세요."};
     if(c===403) return {t:server+" 권한이 없어요", d:"구글 클라우드 콘솔에서 "+server+" API를 켜고, 로그인할 때 모든 권한에 체크해 주세요."};
@@ -316,6 +343,11 @@ select.field{appearance:none}
   async function getToken(){ if(token && Date.now()<tokenExp) return token; return await signIn(""); }
   async function gapi(server, url, opts){
     if(!navigator.onLine) throw {code:"offline"};
+    if(proxy()){
+      const r=await viaProxy(url,opts);
+      if(!r.ok){ let m=""; try{ const j=await r.clone().json(); m=(j.error&&j.error.message)||""; }catch(e){} throw {code:r.status, message:m}; }
+      return r;
+    }
     let t = await getToken();
     let r = await fetch(url, {...(opts||{}), headers:{...((opts&&opts.headers)||{}), Authorization:"Bearer "+t}});
     if(r.status===401){ token=null; t=await signIn(""); r = await fetch(url, {...(opts||{}), headers:{...((opts&&opts.headers)||{}), Authorization:"Bearer "+t}}); }
@@ -483,10 +515,29 @@ select.field{appearance:none}
     const n=text.match(/\s*\((-?\d[\d,.]*)\/(\d[\d,.]*)\s*([^)]*)\)\s*$/);
     if(n){ num={cur:+n[1].replace(/,/g,""), target:+n[2].replace(/,/g,""), unit:n[3].trim()}; text=text.slice(0,n.index).trim(); }
     const date=((ev.start&&(ev.start.date||ev.start.dateTime))||"").slice(0,10);
-    return {id:ev.id, hz:+m[2], area:m[3].trim(), text, num, manualDone:!!m[1], done:!!m[1]||!!(num&&num.target>0&&num.cur>=num.target), date};
+    const ds=parseDesc(ev.description);
+    return {id:ev.id, hz:+m[2], area:m[3].trim(), text, num, manualDone:!!m[1], done:!!m[1]||!!(num&&num.target>0&&num.cur>=num.target), date, steps:ds.steps, notes:ds.notes, req:ds.req};
+  }
+  // 설명란: 메모 + "할 일:" 체크리스트 + (#정리요청). 에이전트·구글 캘린더에서도 그대로 읽힘
+  function parseDesc(d){
+    const steps=[], notes=[]; let req=false;
+    String(d||"").replace(/<br\s*\/?>/gi,"\n").replace(/<[^>]+>/g,"").replace(/&nbsp;/g," ").replace(/&amp;/g,"&").split(/\r?\n/).forEach(line=>{
+      const t=line.trim(); const m=t.match(/^[-*]\s*\[( |x|X)\]\s*(.+)$/);
+      if(m) steps.push({on:m[1]!==" ", t:m[2].trim()});
+      else if(/^#정리요청/.test(t)) req=true;
+      else if(t!=="할 일:" && t!=="") notes.push(t);
+    });
+    return {steps, notes:notes.join("\n"), req};
+  }
+  function buildDesc(k){
+    let out=k.notes?k.notes+"\n\n":"";
+    if(k.steps&&k.steps.length) out+="할 일:\n"+k.steps.map(x=>"- ["+(x.on?"x":" ")+"] "+x.t).join("\n");
+    if(k.req) out+=(out?"\n":"")+"#정리요청 — 에이전트가 이 목표를 이루는 데 필요한 할 일을 정리해 위에 넣어 주세요";
+    return out.trim();
   }
   function krSummary(k){ return (k.manualDone?"✓ ":"")+"["+k.hz+"개월·"+k.area+"] "+k.text+(k.num?" ("+k.num.cur+"/"+k.num.target+(k.num.unit||"")+")":""); }
-  const krProg = k => k.done?1:(k.num&&k.num.target>0?Math.max(0,Math.min(1,k.num.cur/k.num.target)):0);
+  const krProg = k => k.done?1:(k.num&&k.num.target>0?Math.max(0,Math.min(1,k.num.cur/k.num.target)):(k.steps&&k.steps.length?k.steps.filter(x=>x.on).length/k.steps.length*0.95:0));
+  const nextStep = k => (k.steps||[]).find(x=>!x.on);
   function hzEnd(hz){ const h=G.heads[hz]; return h&&h.date?h.date:addMonths(GOAL_START,hz); }
   function hzStart(hz){ return addMonths(hzEnd(hz),-hz); }
   const hzItems = hz => G.items.filter(k=>k.hz===hz).sort((a,b)=>a.date<b.date?-1:a.date>b.date?1:0);
@@ -499,7 +550,7 @@ select.field{appearance:none}
     if(!mcp) return; G.loading=true;
     try{
       const tMin=encodeURIComponent(addMonths(GOAL_START,-1)+"T00:00:00+09:00"), tMax=encodeURIComponent(addMonths(todayStr(),25)+"T00:00:00+09:00");
-      const r=await gapi("Google Calendar","https://www.googleapis.com/calendar/v3/calendars/"+encodeURIComponent(CAL_GOAL)+"/events?singleEvents=true&orderBy=startTime&maxResults=250&timeMin="+tMin+"&timeMax="+tMax+"&fields=items(id,summary,start,recurringEventId)");
+      const r=await gapi("Google Calendar","https://www.googleapis.com/calendar/v3/calendars/"+encodeURIComponent(CAL_GOAL)+"/events?singleEvents=true&orderBy=startTime&maxResults=250&timeMin="+tMin+"&timeMax="+tMax+"&fields=items(id,summary,description,start,recurringEventId)");
       const items=(await r.json()).items||[];
       const krs=[], heads={};
       items.forEach(ev=>{
@@ -516,15 +567,15 @@ select.field{appearance:none}
   async function patchEvent(cal,id,body){
     return gapi("Google Calendar","https://www.googleapis.com/calendar/v3/calendars/"+encodeURIComponent(cal)+"/events/"+encodeURIComponent(id),{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
   }
-  async function insertAllDay(summary,date){
-    const r=await gapi("Google Calendar","https://www.googleapis.com/calendar/v3/calendars/"+encodeURIComponent(CAL_GOAL)+"/events",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({summary,start:{date},end:{date:addDays(date,1)},reminders:{useDefault:false,overrides:[{method:"popup",minutes:900}]}})});
+  async function insertAllDay(summary,date,description){
+    const r=await gapi("Google Calendar","https://www.googleapis.com/calendar/v3/calendars/"+encodeURIComponent(CAL_GOAL)+"/events",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({summary,description:description||"",start:{date},end:{date:addDays(date,1)},reminders:{useDefault:false,overrides:[{method:"popup",minutes:900}]}})});
     return r.json();
   }
   async function saveKR(k, msg){
     const before=G.items.find(x=>x.id===k.id); const snap=before?{...before,num:before.num?{...before.num}:null}:null;
     k.done=k.manualDone||!!(k.num&&k.num.target>0&&k.num.cur>=k.num.target);
     G.items=G.items.map(x=>x.id===k.id?k:x); delete CAL.cache[CAL.y+"-"+CAL.m]; render();
-    try{ await patchEvent(CAL_GOAL,k.id,{summary:krSummary(k), start:{date:k.date}, end:{date:addDays(k.date,1)}}); store.set("studio-goals-cache",{items:G.items,heads:G.heads}); if(msg) toast(msg); }
+    try{ await patchEvent(CAL_GOAL,k.id,{summary:krSummary(k), description:buildDesc(k), start:{date:k.date}, end:{date:addDays(k.date,1)}}); store.set("studio-goals-cache",{items:G.items,heads:G.heads}); if(msg) toast(msg); }
     catch(e){ if(snap) G.items=G.items.map(x=>x.id===k.id?snap:x); render(); toast(errText(e,"Google Calendar").t+" · 저장하지 못했어요"); }
   }
 
@@ -559,10 +610,13 @@ select.field{appearance:none}
   function areaPill(a){ const m={"공모":"p-blue","영업":"p-green","크몽":"p-orange","돈":"p-green","작품":"p-blue","홍보":"p-orange","행정":"p-grey","전시":"p-grey"}; return '<span class="pill '+(m[a]||"p-grey")+'">'+esc(a)+'</span>'; }
   function dueText(k){ const n=dayDiff(k.date); if(k.done) return '<span>'+esc(dateLabel(k.date))+'</span>'; if(n<0) return '<span class="late">'+(-n)+'일 지남</span>'; return '<span>'+esc(dateLabel(k.date))+' · '+esc(dLabel(k.date))+'</span>'; }
   function krRow(k, idx){
-    const lead = idx!=null ? '<span class="idx">'+idx+'</span>' : k.num&&!k.done ? '<span class="numbox">'+Math.round(krProg(k)*100)+'%</span>' : '<span class="check">'+I.check+'</span>';
+    const lead = idx!=null ? '<span class="idx">'+idx+'</span>' : (k.num||(k.steps&&k.steps.length))&&!k.done ? '<span class="numbox">'+Math.round(krProg(k)*100)+'%</span>' : '<span class="check">'+I.check+'</span>';
     return '<button class="kr press'+(k.done?" done":"")+'" data-kr="'+esc(k.id)+'">'+lead+'<span class="main"><span class="t">'+esc(k.text)+'</span>'+
       (k.num?'<span class="s"><b style="color:var(--fg);font-variant-numeric:tabular-nums">'+fmtN(k.num.cur)+' / '+fmtN(k.num.target)+esc(k.num.unit)+'</b></span>'+progBar(krProg(k),"thin"+(k.done?" done":"")):'')+
-      '<span class="s">'+areaPill(k.area)+(idx!=null?'<span>'+k.hz+'개월</span>':'')+dueText(k)+'</span></span>'+I.right.replace('<svg','<svg style="width:18px;height:18px;flex:0 0 18px;color:var(--faint)"')+'</button>';
+      (!k.num&&k.steps&&k.steps.length&&!k.done?progBar(krProg(k),"thin"):'')+
+      (!k.done&&nextStep(k)?'<span class="next">다음: '+esc(nextStep(k).t)+'</span>':'')+
+      (k.req?'<span class="next">에이전트가 할 일을 정리하는 중</span>':'')+
+      '<span class="s">'+areaPill(k.area)+(idx!=null?'<span>'+k.hz+'개월</span>':'')+(k.steps&&k.steps.length?'<span>할 일 '+k.steps.filter(x=>x.on).length+'/'+k.steps.length+'</span>':'')+dueText(k)+'</span></span>'+I.right.replace('<svg','<svg style="width:18px;height:18px;flex:0 0 18px;color:var(--faint)"')+'</button>';
   }
 
   function viewGoals(){
@@ -628,10 +682,26 @@ select.field{appearance:none}
     if(k.num){
       h+='<div class="flabel">지금 몇 '+esc(k.num.unit||"")+'까지 왔나요? (목표 '+fmtN(k.num.target)+esc(k.num.unit)+')</div><div class="stepper"><button class="btn btn-grey" data-step="-1" aria-label="1 빼기">−</button><input class="field" id="kr-cur" type="number" inputmode="numeric" value="'+k.num.cur+'"><button class="btn btn-grey" data-step="1" aria-label="1 더하기">+</button></div>';
     }
+    h+='<div class="flabel">이루기 위해 필요한 것 '+(k.steps.length?k.steps.filter(x=>x.on).length+'/'+k.steps.length:'')+'</div>'+
+      (k.steps.length?'<div class="steps">'+k.steps.map((x,i)=>'<button class="stp'+(x.on?" on":"")+'" data-sti="'+i+'" aria-pressed="'+x.on+'"><span class="check">'+I.check+'</span><span>'+esc(x.t)+'</span></button>').join("")+'</div>':'')+
+      '<div class="addrow"><input class="field" id="st-new" placeholder="필요한 것 직접 추가" enterkeyhint="done"><button class="btn btn-weak" data-stadd="1">추가</button></div>'+
+      (k.req?'<div class="reqbox">에이전트에게 정리를 맡겼어요. 맥북 에이전트가 다음에 실행될 때(늦어도 몇 시간 안) 이 목표를 이루는 데 필요한 할 일을 정리해 여기에 채워요.</div>':'<button class="btn btn-grey" data-streq="1">'+(k.steps.length?'에이전트에게 빠진 것 더 정리해 달라고 하기':'에이전트에게 필요한 것 정리해 달라고 하기')+'</button>');
     h+='<div class="flabel">이름</div><input class="field" id="kr-text" value="'+esc(k.text)+'"><div class="flabel">기한</div><input class="field" id="kr-date" type="date" value="'+esc(k.date)+'">';
     h+='<div class="actions">'+(k.num?'':'<button class="btn '+(k.manualDone?"btn-grey":"btn-weak")+'" data-krdone="'+esc(k.id)+'">'+(k.manualDone?"아직 안 끝났어요":"달성했어요")+'</button>')+'<button class="btn btn-primary" data-krsave="'+esc(k.id)+'">저장</button></div>';
-    sheet(h);
+    S.sheetKR=k.id; sheet(h);
+    const inp=document.getElementById("st-new"); if(inp) inp.addEventListener("keydown",e=>{ if(e.key==="Enter"){ e.preventDefault(); const b=document.querySelector("[data-stadd]"); b&&b.click(); } });
   }
+  async function updateSteps(fn, msg){
+    const k=G.items.find(x=>x.id===S.sheetKR); if(!k) return;
+    const n={...k, steps:(k.steps||[]).map(x=>({...x}))}; fn(n);
+    const allOn=n.steps.length&&n.steps.every(x=>x.on);
+    G.items=G.items.map(x=>x.id===n.id?n:x); render(); krSheetKeep(n.id);
+    try{ await patchEvent(CAL_GOAL,n.id,{description:buildDesc(n)}); store.set("studio-goals-cache",{items:G.items,heads:G.heads}); if(msg) toast(msg); if(allOn&&!n.done) toast("할 일을 다 끝냈어요! '달성했어요'를 눌러 마무리하세요"); }
+    catch(e){ G.items=G.items.map(x=>x.id===k.id?k:x); render(); krSheetKeep(k.id); toast(errText(e,"Google Calendar").t+" · 저장하지 못했어요"); }
+  }
+  function krSheetKeep(id){ const sh=document.querySelector(".sheet"); const top=sh?sh.scrollTop:0; const typed=(document.getElementById("kr-text")||{}).value, dt=(document.getElementById("kr-date")||{}).value, cur=(document.getElementById("kr-cur")||{}).value;
+    const l=document.getElementById("layer"); const prev=l.innerHTML; krSheet(id); const w=document.querySelector(".sheet-wrap"); if(w) w.style.animation="none"; const s2=document.querySelector(".sheet"); if(s2){ s2.style.animation="none"; s2.scrollTop=top; }
+    if(typed!=null&&document.getElementById("kr-text")) document.getElementById("kr-text").value=typed; if(dt&&document.getElementById("kr-date")) document.getElementById("kr-date").value=dt; if(cur!=null&&document.getElementById("kr-cur")) document.getElementById("kr-cur").value=cur; }
   function readKRForm(k){
     const n={...k, num:k.num?{...k.num}:null};
     const t=(document.getElementById("kr-text")||{}).value; if(t&&t.trim()) n.text=t.trim().replace(/[\[\]]/g,"");
@@ -648,6 +718,7 @@ select.field{appearance:none}
       '<label class="opt"><input type="checkbox" id="add-isnum"> 숫자로 세는 목표예요</label>'+
       '<div id="add-numrow" hidden style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><input class="field" id="add-target" type="number" inputmode="numeric" placeholder="목표 숫자 (예: 10)"><input class="field" id="add-unit" placeholder="단위 (예: 곳)"></div>'+
       '<div class="flabel">기한</div><input class="field" id="add-date" type="date" value="'+esc(hzEnd(hz))+'">'+
+      '<label class="opt"><input type="checkbox" id="add-req" checked> 이루기 위해 필요한 것을 에이전트가 정리해서 넣어 주기</label>'+
       '<div class="actions"><button class="btn btn-grey" data-close="1">취소</button><button class="btn btn-primary" data-addsave="1">추가</button></div>');
     const cb=document.getElementById("add-isnum"); cb.addEventListener("change",()=>{ document.getElementById("add-numrow").hidden=!cb.checked; });
   }
@@ -655,9 +726,9 @@ select.field{appearance:none}
     const text=(document.getElementById("add-text").value||"").trim().replace(/[\[\]]/g,""); if(!text){ toast("무엇을 할지 적어 주세요"); return; }
     const area=document.getElementById("add-area").value, date=document.getElementById("add-date").value||hzEnd(S.addHz);
     let num=null; if(document.getElementById("add-isnum").checked){ const t=Math.round(Number(document.getElementById("add-target").value)); if(!(t>0)){ toast("목표 숫자를 적어 주세요"); return; } num={cur:0,target:t,unit:(document.getElementById("add-unit").value||"").trim()}; }
-    const k={hz:S.addHz, area, text, num, manualDone:false, done:false, date};
+    const k={hz:S.addHz, area, text, num, manualDone:false, done:false, date, steps:[], notes:"", req:document.getElementById("add-req").checked};
     btn.disabled=true; btn.textContent="추가하는 중…";
-    try{ const ev=await insertAllDay(krSummary(k),date); k.id=ev.id; G.items.push(k); delete CAL.cache[CAL.y+"-"+CAL.m]; S.hz=k.hz; closeSheet(); render(); loadMonth(); toast("'0. 목표' 캘린더에 넣었어요"); }
+    try{ const ev=await insertAllDay(krSummary(k),date,buildDesc(k)); k.id=ev.id; G.items.push(k); delete CAL.cache[CAL.y+"-"+CAL.m]; S.hz=k.hz; closeSheet(); render(); loadMonth(); toast("'0. 목표' 캘린더에 넣었어요"); }
     catch(e){ btn.disabled=false; btn.textContent="추가"; toast(errText(e,"Google Calendar").t); }
   }
   function headSheet(hz){
@@ -676,7 +747,7 @@ select.field{appearance:none}
   }
 
   function setupHtml(){
-    return '<section class="card hero"><span class="eyebrow">처음 한 번만</span><p class="big">구글 연결 코드를 넣어 주세요</p><p class="empty">설치 안내서의 \'구글 로그인 설정\'에서 만든 <b>클라이언트 ID</b>를 붙여 넣으면 돼요. 이 휴대폰에만 저장돼요.</p>'+
+    return '<section class="card hero"><span class="eyebrow">처음 한 번만</span><p class="big">구글 연결이 필요해요</p><p class="empty">맥에서 받은 <b>연결 링크</b>를 이 휴대폰에서 한 번 열면 로그인 없이 바로 연결돼요. 링크가 없으면 아래에 클라이언트 ID를 넣어도 돼요.</p><p class="empty">설치 안내서의 \'구글 로그인 설정\'에서 만든 <b>클라이언트 ID</b>를 붙여 넣으면 돼요. 이 휴대폰에만 저장돼요.</p>'+
       '<label for="cid" class="label" style="font-size:14px;color:var(--sub);font-weight:600">클라이언트 ID</label><input id="cid" inputmode="url" autocomplete="off" placeholder="123456-abc.apps.googleusercontent.com" style="height:52px;border-radius:14px;border:1px solid var(--line);background:var(--grey-weak);color:var(--fg);padding:0 14px;font-size:15px;width:100%">'+
       '<button class="btn btn-primary" data-savecid="1">저장하고 연결하기</button></section>';
   }
@@ -854,6 +925,9 @@ select.field{appearance:none}
     if(t.dataset.tab){ go(t.dataset.tab); return; }
     if(t.dataset.hz){ S.hz=+t.dataset.hz; store.set("studio-goals-hz",S.hz); buzz(); render(); return; }
     if(t.dataset.kr){ krSheet(t.dataset.kr); return; }
+    if(t.dataset.sti!=null){ const i=+t.dataset.sti; buzz(); updateSteps(n=>{ n.steps[i].on=!n.steps[i].on; }); return; }
+    if(t.dataset.stadd){ const inp=document.getElementById("st-new"); const v=(inp.value||"").trim().replace(/\n/g," "); if(!v){ inp.focus(); return; } updateSteps(n=>{ n.steps.push({on:false,t:v}); }, "추가했어요"); return; }
+    if(t.dataset.streq){ updateSteps(n=>{ n.req=true; }, "에이전트에게 맡겼어요"); return; }
     if(t.dataset.kradd){ addSheet(+t.dataset.kradd); return; }
     if(t.dataset.addhz){ S.addHz=+t.dataset.addhz; document.querySelectorAll("[data-addhz]").forEach(b=>b.setAttribute("aria-pressed",String(+b.dataset.addhz===S.addHz))); const d=document.getElementById("add-date"); if(d) d.value=hzEnd(S.addHz); return; }
     if(t.dataset.addsave){ doAdd(t); return; }
@@ -901,7 +975,8 @@ select.field{appearance:none}
   fromHash();
 
   try{ const t=JSON.parse(sessionStorage.getItem("studio-token")||"null"); if(t && Date.now()<t.tokenExp){ token=t.token; tokenExp=t.tokenExp; mcp=true; } }catch(e){}
-  function boot(){ S.ready=true; initAuth(); if(clientId() && mcp) loadData(false); else { S.loading=false; render(); } }
+  if(proxy()) mcp=true;
+  function boot(){ S.ready=true; initAuth(); if(clientId() && mcp) loadData(false); else { S.loading=false; render(); } if(window.__connected) setTimeout(()=>toast("연결됐어요. 이제 로그인 없이 열려요"),600); }
   if(window.google&&google.accounts) boot(); else { window.addEventListener("load",()=>setTimeout(boot,50)); setTimeout(()=>{ if(!S.ready) boot(); },4000); }
   window.addEventListener("online",()=>{ if(mcp) loadData(true); });
   if("serviceWorker" in navigator){ navigator.serviceWorker.register("sw.js").catch(()=>{}); }
